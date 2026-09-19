@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guard-rail"
+version = "0.1.0"
+description = "Dual-path prompt injection and jailbreak firewall: sub-5ms heuristics plus an adversarial vector gate."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["llm", "security", "prompt-injection", "jailbreak", "guardrails"]
+dependencies = [
+    "pydantic>=2.6",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "mypy>=1.9"]
+
+[project.scripts]
+guardrail = "guardrail.cli:main"
+
+[tool.setuptools]
+packages = ["guardrail"]
+
+[tool.setuptools.package-data]
+guardrail = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
+plugins = []
+
+[[tool.mypy.overrides]]
+module = "eval.*"
+strict = true
