@@ -22,7 +22,7 @@ from eval.test_prompts import PROMPTS, LabeledPrompt
 from guardrail import fast_path
 from guardrail.gateway import Gateway
 from guardrail.models import GatewayConfig, InspectionPath, InspectionResult, Verdict
-from guardrail.semantic_path import SemanticGate
+from guardrail.semantic_path import EmbeddingBackend, SemanticGate, build_backend
 
 
 @dataclass(frozen=True)
@@ -63,12 +63,22 @@ def percentile(values: Sequence[float], q: float) -> float:
     return ordered[index]
 
 
-def run(config: GatewayConfig, repeats: int = 1) -> list[Outcome]:
-    gateway = Gateway(config)
-    outcomes: list[Outcome] = []
-    for _ in range(repeats):
-        outcomes = [Outcome(prompt=p, result=gateway.inspect(p.text)) for p in PROMPTS]
-    return outcomes
+def run(
+    config: GatewayConfig,
+    repeats: int = 1,
+    backend: EmbeddingBackend | None = None,
+) -> tuple[list[Outcome], list[Outcome]]:
+    """Returns (cold_pass, warm_pass).
+
+    The first pass pays full cost -- for a remote backend that means network
+    latency on every prompt. Later passes hit the embedding cache, which is how
+    a real gateway behaves once traffic repeats.
+    """
+    gateway = Gateway(config, backend=backend)
+    passes: list[list[Outcome]] = []
+    for _ in range(max(1, repeats)):
+        passes.append([Outcome(prompt=p, result=gateway.inspect(p.text)) for p in PROMPTS])
+    return passes[0], passes[-1]
 
 
 def score(outcomes: Sequence[Outcome]) -> dict[str, float]:
@@ -116,15 +126,28 @@ def latency_table(outcomes: Sequence[Outcome]) -> dict[str, dict[str, float]]:
     }
 
 
-def sweep(config: GatewayConfig, lo: float = 0.05, hi: float = 0.60, step: float = 0.025) -> list[dict[str, float]]:
-    """FPR/FNR as a function of the semantic threshold -- the calibration wall."""
-    gate = SemanticGate(config)
+def sweep(
+    config: GatewayConfig,
+    backend: EmbeddingBackend | None = None,
+    steps: int = 24,
+) -> list[dict[str, float]]:
+    """FPR/FNR as a function of the semantic threshold -- the calibration wall.
+
+    The range is derived from the observed score distribution rather than
+    hard-coded, because the two backends do not share a similarity scale.
+    """
+    gate = SemanticGate(config, backend=backend)
     fast_gateway = Gateway(config.model_copy(update={"fast_path_only": True}))
     prescored: list[tuple[LabeledPrompt, bool, float]] = []
     for prompt in PROMPTS:
         fast_result = fast_gateway.inspect(prompt.text)
         centroid, exemplar, _ = gate.score(prompt.text)
         prescored.append((prompt, fast_result.verdict is Verdict.BLOCK, max(centroid, exemplar)))
+
+    observed = [sim for _, _, sim in prescored]
+    lo = max(0.0, min(observed) - 0.02)
+    hi = min(1.0, max(observed) + 0.02)
+    step = (hi - lo) / max(1, steps)
 
     rows: list[dict[str, float]] = []
     threshold = lo
@@ -165,7 +188,10 @@ def _print_scorecard(outcomes: Sequence[Outcome], config: GatewayConfig) -> None
     print(f"prompts            : {len(outcomes)} (15 adversarial / 15 benign / 10 boundary)")
     print(f"mode               : {'fast-path only' if config.fast_path_only else 'dual-path'}")
     print(f"embedding backend  : {gate_name}")
-    threshold = config.semantic_threshold if "gemini" in gate_name else config.local_semantic_threshold
+    threshold = next(
+        (o.result.semantic.threshold for o in outcomes if o.result.semantic is not None),
+        config.local_semantic_threshold,
+    )
     print(f"semantic threshold : {threshold:.3f}")
     print()
     flagged_attack = sum(o.flagged for o in outcomes if o.prompt.expect_block)
@@ -217,13 +243,14 @@ def _print_scorecard(outcomes: Sequence[Outcome], config: GatewayConfig) -> None
     print(_BAR)
 
 
-def _print_sweep(rows: Sequence[dict[str, float]]) -> None:
+def _print_sweep(rows: Sequence[dict[str, float]], operating_point: float) -> None:
     print(_BAR)
     print("semantic threshold sweep (fast path always on)")
     print(_BAR)
     print(f"  {'threshold':>10}{'recall':>10}{'FNR':>10}{'FPR':>10}{'precision':>12}")
+    nearest = min(rows, key=lambda r: abs(r["threshold"] - operating_point))["threshold"] if rows else 0.0
     for row in rows:
-        marker = "  <-- operating point" if abs(row["threshold"] - GatewayConfig().local_semantic_threshold) < 1e-6 else ""
+        marker = "  <-- operating point" if row["threshold"] == nearest else ""
         print(
             f"  {row['threshold']:>10.3f}{row['recall']:>10.3f}{row['fnr']:>10.3f}"
             f"{row['fpr']:>10.3f}{row['precision']:>12.3f}{marker}"
@@ -247,14 +274,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         updates["semantic_threshold"] = args.threshold
     config = GatewayConfig().model_copy(update=updates)
 
-    outcomes = run(config, repeats=max(1, args.repeats))
+    backend = None if args.fast_only else build_backend()
+    cold, outcomes = run(config, repeats=max(1, args.repeats), backend=backend)
     metrics = score(outcomes)
-    rows = sweep(config) if args.sweep else []
+    rows = sweep(config, backend=backend) if args.sweep else []
+    operating_point = (
+        config.semantic_threshold
+        if backend is not None and backend.is_remote
+        else config.local_semantic_threshold
+    )
 
     if args.json:
         print(json.dumps({
             "metrics": metrics,
+            "backend": backend.name if backend is not None else "fast-path only",
+            "operating_point": operating_point,
             "latency_ms": latency_table(outcomes),
+            "latency_ms_cold": latency_table(cold),
             "sweep": rows,
             "results": [
                 {
@@ -272,8 +308,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         }, indent=2))
     else:
         _print_scorecard(outcomes, config)
+        if backend is not None and backend.is_remote:
+            cold_sem = latency_table(cold)["semantic_path"]
+            warm_sem = latency_table(outcomes)["semantic_path"]
+            print("remote backend, cold vs warm semantic latency (ms)")
+            print(f"  {'':10}{'p50':>10}{'p95':>10}{'p99':>10}")
+            print(f"  {'cold':10}{cold_sem['p50']:>10.3f}{cold_sem['p95']:>10.3f}{cold_sem['p99']:>10.3f}")
+            print(f"  {'warm':10}{warm_sem['p50']:>10.3f}{warm_sem['p95']:>10.3f}{warm_sem['p99']:>10.3f}")
+            print()
         if rows:
-            _print_sweep(rows)
+            _print_sweep(rows, operating_point)
 
     return 1 if metrics["recall"] < args.fail_under_recall else 0
 

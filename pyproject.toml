@@ -17,6 +17,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "mypy>=1.9"]
+# Only needed for the Gemini backend: the python.org macOS builds ship without
+# a root certificate store, so urllib cannot verify the API's TLS chain.
+remote = ["certifi>=2024.2.2"]
 
 [project.scripts]
 guardrail = "guardrail.cli:main"

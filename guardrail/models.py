@@ -92,7 +92,11 @@ class GatewayConfig(BaseModel):
     local_semantic_threshold: float = 0.25
     # Scores within this margin below the threshold are flagged (SANITIZE), not
     # dropped -- the review band that keeps FPR at zero without going blind.
-    semantic_review_margin: float = 0.10
+    # Backend-relative for the same reason the thresholds are: Gemini packs all
+    # English text into a narrow high band, so a margin sized for the local
+    # backend's wide scale would flag nearly all legitimate traffic.
+    semantic_review_margin: float = 0.02
+    local_semantic_review_margin: float = 0.10
     canary_token: str = "SECRET_CANARY_REV_77"
     # Fast-path confidence >= block_confidence drops without touching vectors.
     block_confidence: float = 0.90

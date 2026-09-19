@@ -112,3 +112,31 @@ def test_build_backend_falls_back_to_local_without_a_key(monkeypatch: pytest.Mon
     backend = build_backend()
     assert backend.is_remote is False
     assert backend.name == "local-hashing-v1"
+
+
+def test_review_margin_is_backend_relative() -> None:
+    """A margin sized for the local scale would flag nearly all remote traffic."""
+    config = GatewayConfig()
+    local = SemanticGate(config, backend=HashingEmbedder())
+    assert local.review_margin == config.local_semantic_review_margin
+    assert config.semantic_review_margin < config.local_semantic_review_margin
+
+
+def test_gemini_embedder_is_configured_for_semantic_similarity() -> None:
+    """taskType must never silently become a RETRIEVAL_* variant."""
+    import inspect as _inspect
+
+    from guardrail.semantic_path import GeminiEmbedder
+
+    source = _inspect.getsource(GeminiEmbedder)
+    assert source.count('"taskType"') == 1, "exactly one task type may be sent"
+    assert '"taskType": "SEMANTIC_SIMILARITY"' in source
+
+
+def test_gemini_embedder_caches_and_never_logs_the_key() -> None:
+    from guardrail.semantic_path import GeminiEmbedder
+
+    embedder = GeminiEmbedder("secret-key-value")
+    assert "secret-key-value" not in embedder.name
+    assert embedder.api_calls == 0
+    assert embedder._cache == {}

@@ -19,8 +19,11 @@ import hashlib
 import json
 import os
 import re
+import ssl
+import time
 import urllib.error
 import urllib.request
+import warnings
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol, Sequence
@@ -31,6 +34,22 @@ import numpy.typing as npt
 from guardrail.models import GatewayConfig, SemanticAssessment, Signal, ThreatType
 
 Matrix = npt.NDArray[np.float64]
+
+
+def _ssl_context() -> ssl.SSLContext | None:
+    """Prefer certifi's trust store.
+
+    The python.org macOS builds ship without root certificates, so a plain
+    urlopen raises CERTIFICATE_VERIFY_FAILED. That surfaces as a URLError,
+    which is exactly the exception `build_backend` treats as "no remote
+    backend" -- a misconfigured trust store would otherwise look identical to
+    a missing API key and silently downgrade the gate.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return None
+    return ssl.create_default_context(cafile=certifi.where())
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "jailbreaks.json"
 
@@ -104,13 +123,29 @@ class GeminiEmbedder:
     name = "gemini-semantic-similarity"
     is_remote = True
 
-    def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str | None = None,
+        timeout: float = 20.0,
+        cache: bool = True,
+        max_retries: int = 4,
+    ) -> None:
         self.api_key = api_key
         self.model = model or os.environ.get("GUARDRAIL_EMBED_MODEL", "gemini-embedding-001")
         self.timeout = timeout
+        self.max_retries = max_retries
         self.name = f"gemini:{self.model}"
+        self.context = _ssl_context()
+        # Production gateways cache embeddings; without one, a repeated prompt
+        # pays full network latency every turn.
+        self._cache: dict[str, Matrix] | None = {} if cache else None
+        self.api_calls = 0
 
-    def embed(self, texts: Sequence[str]) -> Matrix:
+    def _key(self, text: str) -> str:
+        return hashlib.sha256(f"{self.model}|SEMANTIC_SIMILARITY|{text}".encode("utf-8")).hexdigest()
+
+    def _fetch(self, texts: Sequence[str]) -> Matrix:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}"
             f":batchEmbedContents?key={self.api_key}"
@@ -131,20 +166,56 @@ class GeminiEmbedder:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+        # 429/5xx are normal on shared quota; a firewall that dies on a rate
+        # limit fails open, so back off and retry before giving up.
+        for attempt in range(self.max_retries):
+            self.api_calls += 1
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:
+                    body: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                retryable = exc.code == 429 or 500 <= exc.code < 600
+                if not retryable or attempt == self.max_retries - 1:
+                    raise
+                time.sleep(2.0 * (2**attempt))
         vectors = [np.asarray(item["values"], dtype=np.float64) for item in body["embeddings"]]
         return _l2(np.vstack(vectors))
 
+    def embed(self, texts: Sequence[str]) -> Matrix:
+        if self._cache is None:
+            return self._fetch(texts)
+        missing = [t for t in texts if self._key(t) not in self._cache]
+        if missing:
+            fetched = self._fetch(missing)
+            for text, row in zip(missing, fetched):
+                self._cache[self._key(text)] = row.reshape(1, -1)
+        return np.vstack([self._cache[self._key(t)] for t in texts])
 
-def build_backend(prefer_remote: bool = True) -> EmbeddingBackend:
-    """Remote when a key is exported and reachable, deterministic local otherwise."""
+
+def build_backend(prefer_remote: bool = True, strict: bool = False) -> EmbeddingBackend:
+    """Remote when a key is exported and reachable, deterministic local otherwise.
+
+    A silent downgrade is the dangerous failure mode for a security gate: the
+    operator believes the semantic path is running on real embeddings while it
+    is actually running on a lexical proxy. When a key is present but unusable
+    we therefore warn loudly, and `strict=True` refuses to degrade at all.
+    """
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if prefer_remote and key:
         remote = GeminiEmbedder(key)
         try:
             remote.embed(["warmup"])
-        except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        except (urllib.error.URLError, KeyError, ValueError, TimeoutError, OSError) as exc:
+            if strict:
+                raise RuntimeError(f"remote embedding backend unavailable: {exc!r}") from exc
+            warnings.warn(
+                f"GEMINI_API_KEY is set but the remote backend is unreachable ({exc!r}); "
+                "falling back to the local hashing backend. The semantic gate is now "
+                "running on a weaker representation -- see README 'Threshold calibration'.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return HashingEmbedder()
         return remote
     return HashingEmbedder()
@@ -181,6 +252,15 @@ class SemanticGate:
         """Backend-specific: the two similarity scales are not interchangeable."""
         return self.config.semantic_threshold if self.backend.is_remote else self.config.local_semantic_threshold
 
+    @property
+    def review_margin(self) -> float:
+        """Also backend-specific -- see `threshold`."""
+        return (
+            self.config.semantic_review_margin
+            if self.backend.is_remote
+            else self.config.local_semantic_review_margin
+        )
+
     def score(self, text: str) -> tuple[float, float, int]:
         vector = self.backend.embed([text])
         centroid_sims = (self.centroids @ vector.T).ravel()
@@ -191,6 +271,10 @@ class SemanticGate:
         exemplar_top = float(exemplar_sims[best_exemplar])
         owner = best_centroid if centroid_top >= exemplar_top else int(self.exemplar_owner[best_exemplar])
         return centroid_top, exemplar_top, owner
+
+    def prewarm(self, texts: Sequence[str]) -> None:
+        """Embed many texts in one batch call -- avoids per-prompt rate limits."""
+        self.backend.embed(list(texts))
 
     def inspect(self, text: str, threshold: float | None = None) -> tuple[Signal | None, SemanticAssessment]:
         started = perf_counter()
@@ -206,7 +290,7 @@ class SemanticGate:
             threshold=gate,
             latency_ms=(perf_counter() - started) * 1000.0,
         )
-        margin = self.config.semantic_review_margin
+        margin = self.review_margin
         if best < gate - margin:
             return None, assessment
 
