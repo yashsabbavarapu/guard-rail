@@ -6,12 +6,12 @@ the fast path and the semantic path stay swappable behind a single result type.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ThreatType(str, Enum):
+class ThreatType(StrEnum):
     """Taxonomy of what the gateway believes it is looking at."""
 
     INJECTION_DELIMITER = "INJECTION_DELIMITER"
@@ -22,7 +22,7 @@ class ThreatType(str, Enum):
     BENIGN = "BENIGN"
 
 
-class Verdict(str, Enum):
+class Verdict(StrEnum):
     """ALLOW forwards verbatim, SANITIZE forwards a defanged copy, BLOCK drops."""
 
     ALLOW = "ALLOW"
@@ -30,7 +30,7 @@ class Verdict(str, Enum):
     SANITIZE = "SANITIZE"
 
 
-class InspectionPath(str, Enum):
+class InspectionPath(StrEnum):
     """Which stage produced the terminal verdict (for latency attribution)."""
 
     FAST = "fast_path"

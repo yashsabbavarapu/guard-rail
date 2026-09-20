@@ -11,9 +11,8 @@ pipelines and CI gates.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 from guardrail.gateway import Gateway
 from guardrail.models import GatewayConfig, InspectionResult, Verdict

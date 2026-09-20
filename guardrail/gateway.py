@@ -80,7 +80,7 @@ class Gateway:
             return self._result(
                 verdict=semantic_verdict,
                 signal=signal,
-                reasons=reasons + [signal.reason],
+                reasons=[*reasons, signal.reason],
                 path=InspectionPath.SEMANTIC,
                 fast_ms=report.latency_ms,
                 semantic_ms=assessment.latency_ms,
@@ -95,7 +95,7 @@ class Gateway:
             return self._result(
                 verdict=Verdict.SANITIZE,
                 signal=report.top,
-                reasons=reasons + [f"semantic gate cleared it ({assessment.score:.3f} < {assessment.threshold:.2f})"],
+                reasons=[*reasons, f"semantic gate cleared it ({assessment.score:.3f} < {assessment.threshold:.2f})"],
                 path=InspectionPath.SEMANTIC,
                 fast_ms=report.latency_ms,
                 semantic_ms=assessment.latency_ms,

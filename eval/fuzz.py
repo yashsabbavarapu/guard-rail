@@ -15,8 +15,8 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from eval.test_prompts import PROMPTS, LabeledPrompt
 from guardrail import fast_path
@@ -59,7 +59,7 @@ def percentile(values: Sequence[float], q: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, int(round(q / 100.0 * (len(ordered) - 1)))))
+    index = min(len(ordered) - 1, max(0, round(q / 100.0 * (len(ordered) - 1))))
     return ordered[index]
 
 

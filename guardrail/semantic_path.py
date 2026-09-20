@@ -24,9 +24,11 @@ import time
 import urllib.error
 import urllib.request
 import warnings
+from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -55,9 +57,12 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "jailbreaks.jso
 
 _TOKEN = re.compile(r"[a-z0-9']+")
 _STOPWORDS = frozenset(
-    """a an and are as at be been but by can could do does for from had has have how i if in
-    into is it its me my of on or our so that the their them then there these they this to us
-    was we were what when which who will with would you your""".split()
+    [
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could", "do", "does", "for", "from", "had",
+        "has", "have", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "of", "on", "or", "our", "so", "that",
+        "the", "their", "them", "then", "there", "these", "they", "this", "to", "us", "was", "we", "were", "what", "when",
+        "which", "who", "will", "with", "would", "you", "your"
+    ]
 )
 
 
@@ -92,7 +97,7 @@ class HashingEmbedder:
         feats: dict[str, float] = {}
         for word in content:
             feats[f"u:{word}"] = feats.get(f"u:{word}", 0.0) + 1.0
-        for left, right in zip(content, content[1:]):
+        for left, right in pairwise(content):
             key = f"b:{left}_{right}"
             feats[key] = feats.get(key, 0.0) + 0.8
         squashed = " ".join(content)
@@ -143,7 +148,7 @@ class GeminiEmbedder:
         self.api_calls = 0
 
     def _key(self, text: str) -> str:
-        return hashlib.sha256(f"{self.model}|SEMANTIC_SIMILARITY|{text}".encode("utf-8")).hexdigest()
+        return hashlib.sha256(f"{self.model}|SEMANTIC_SIMILARITY|{text}".encode()).hexdigest()
 
     def _fetch(self, texts: Sequence[str]) -> Matrix:
         url = (
@@ -188,7 +193,7 @@ class GeminiEmbedder:
         missing = [t for t in texts if self._key(t) not in self._cache]
         if missing:
             fetched = self._fetch(missing)
-            for text, row in zip(missing, fetched):
+            for text, row in zip(missing, fetched, strict=True):
                 self._cache[self._key(text)] = row.reshape(1, -1)
         return np.vstack([self._cache[self._key(t)] for t in texts])
 
