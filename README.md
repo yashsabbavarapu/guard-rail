@@ -1,5 +1,7 @@
 # guard-rail
 
+[![CI](https://github.com/yashsabbavarapu/guard-rail/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yashsabbavarapu/guard-rail/actions/workflows/ci.yml?query=branch%3Amain)
+
 A dual-path prompt-injection and jailbreak firewall that sits in front of an LLM.
 
 LLM-as-a-judge guardrails (Llama Guard, "is this prompt malicious?") add 800–1500ms
