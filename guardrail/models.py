@@ -6,7 +6,7 @@ the fast path and the semantic path stay swappable behind a single result type.
 
 from __future__ import annotations
 
-from enum import Enum, StrEnum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
