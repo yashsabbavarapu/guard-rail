@@ -62,3 +62,10 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 "eval/test_prompts.py" = ["E501"]
 # Fullwidth homoglyphs are the evasion payload under test, not a typo.
 "tests/test_fast_path.py" = ["RUF001"]
+
+[[tool.mypy.overrides]]
+# certifi is an optional extra: the import is guarded by try/except and the
+# remote backend degrades without it. CI installs only [dev], so mypy must not
+# treat the absent module as a type error.
+module = ["certifi.*"]
+ignore_missing_imports = true
